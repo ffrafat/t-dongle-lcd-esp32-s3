@@ -30,7 +30,6 @@ int16_t current_text_width = 0;
 int16_t current_text_height = 0;
 
 void draw_pixel_callback(int16_t x, int16_t y) {
-    // Final mapping for correct landscape orientation in rotation 3
     tft.drawPixel(text_x_offset + x, text_y_offset + y, current_text_color);
 }
 
@@ -43,15 +42,27 @@ const char* ntpServer = "pool.ntp.org";
 const long  gmtOffset_sec = 21600; // Bangladesh Time (UTC+6)
 const int   daylightOffset_sec = 0;
 
-// Premium Colors
-#define COLOR_BG      0x0000 // Black
-#define COLOR_ACCENT  0xFD20 // Gold/Orange
-#define COLOR_TEXT    0xFFFF // White
-#define COLOR_DAY     0x7BEF // Grey/Blue
+// Dynamic Theme System
+#define COLOR_BG_NIGHT      0x0000 // Black
+#define COLOR_BG_MORNING    0x0010 // Dark Blue
+#define COLOR_BG_DAY        0x0020 // Deep Blue  
+#define COLOR_BG_EVENING    0x2010 // Dark Purple
+
+#define COLOR_ACCENT_GOLD   0xFD20 // Gold/Orange
+#define COLOR_ACCENT_CYAN   0x07FF // Cyan
+#define COLOR_ACCENT_ROSE   0xF9F0 // Rose Pink
+#define COLOR_ACCENT_EMERALD 0x46A0 // Emerald Green
+
+#define COLOR_TEXT          0xFFFF // White
+#define COLOR_DIM           0x6B4D // Dim Grey
+
+uint16_t COLOR_BG = COLOR_BG_NIGHT;
+uint16_t COLOR_ACCENT = COLOR_ACCENT_GOLD;
 
 // Bangla Translation Helpers
 String banglaDigits[] = {"০", "১", "২", "৩", "৪", "৫", "৬", "৭", "৮", "৯"};
 String banglaMonths[] = {"বৈশাখ", "জ্যৈষ্ঠ", "আষাঢ়", "শ্রাবণ", "ভাদ্র", "আশ্বিন", "কার্তিক", "অগ্রহায়ণ", "পৌষ", "মাঘ", "ফাল্গুন", "চৈত্র"};
+String banglaDays[] = {"রবিবার", "সোমবার", "মঙ্গলবার", "বুধবার", "বৃহস্পতিবার", "শুক্রবার", "শনিবার"};
 
 String toBanglaDigits(int num) {
     String s = String(num);
@@ -111,225 +122,338 @@ BanglaDate getBanglaDate(int d, int m, int y) {
     return bd;
 }
 
-// ------------------------------------------------------------------------------------
+// Screen state management
+enum ScreenMode {
+    SCREEN_TIME,
+    SCREEN_DATE_EN,
+    SCREEN_DATE_BN,
+    SCREEN_EVENT
+};
 
+ScreenMode currentScreen = SCREEN_TIME;
+int screenIndex = 0;
+
+// Dynamic theme based on time of day
+void updateThemeForTime(int hour) {
+    if (hour >= 5 && hour < 9) {
+        COLOR_BG = COLOR_BG_MORNING;
+        COLOR_ACCENT = COLOR_ACCENT_GOLD;
+    } else if (hour >= 9 && hour < 17) {
+        COLOR_BG = COLOR_BG_DAY;
+        COLOR_ACCENT = COLOR_ACCENT_CYAN;
+    } else if (hour >= 17 && hour < 20) {
+        COLOR_BG = COLOR_BG_EVENING;
+        COLOR_ACCENT = COLOR_ACCENT_ROSE;
+    } else {
+        COLOR_BG = COLOR_BG_NIGHT;
+        COLOR_ACCENT = COLOR_ACCENT_EMERALD;
+    }
+}
+
+// WiFi signal strength indicator
+void drawWiFiIndicator(int rssi) {
+    int bars = 0;
+    if (rssi > -50) bars = 4;
+    else if (rssi > -60) bars = 3;
+    else if (rssi > -70) bars = 2;
+    else if (rssi > -80) bars = 1;
+    
+    int x = 145;
+    int y = 2;
+    for (int i = 0; i < 4; i++) {
+        int barHeight = 3 + (i * 2);
+        if (i < bars) {
+            tft.fillRect(x + (i * 4), y + (10 - barHeight), 2, barHeight, COLOR_ACCENT);
+        } else {
+            tft.fillRect(x + (i * 4), y + (10 - barHeight), 2, barHeight, COLOR_DIM);
+        }
+    }
+}
+
+// Progress indicator (4 dots)
+void drawProgressIndicator(int activeIndex) {
+    int startX = 64;
+    int y = 75;
+    for (int i = 0; i < 4; i++) {
+        if (i == activeIndex) {
+            tft.fillCircle(startX + (i * 9), y, 3, COLOR_ACCENT);
+        } else {
+            tft.drawCircle(startX + (i * 9), y, 3, COLOR_DIM);
+        }
+    }
+}
+
+// Premium UI with enhancements
 void draw_premium_ui() {
-  struct tm timeinfo;
-  if(!getLocalTime(&timeinfo)){
-    return;
-  }
+    struct tm timeinfo;
+    if(!getLocalTime(&timeinfo)) return;
 
-  tft.fillScreen(COLOR_BG);
-  
-  // Draw Background Accent (Glassmorphism effect)
-  tft.drawRoundRect(5, 5, 150, 70, 8, COLOR_ACCENT);
-  tft.drawRoundRect(6, 6, 148, 68, 7, COLOR_ACCENT);
-
-  // Draw Month Name (e.g., APRIL)
-  char monthStringDisplay[15];
-  strftime(monthStringDisplay, 15, "%B", &timeinfo);
-  for(int i = 0; monthStringDisplay[i]; i++) monthStringDisplay[i] = toupper(monthStringDisplay[i]);
-  
-  tft.setFont(&FreeSansBold12pt7b);
-  tft.setTextColor(COLOR_TEXT);
-  int16_t x1, y1;
-  uint16_t w, h;
-  tft.getTextBounds(monthStringDisplay, 0, 0, &x1, &y1, &w, &h);
-  
-  // If text is too wide for the screen, fall back to a smaller bold font
-  if (w > 150) {
-    tft.setFont(&FreeSans9pt7b);
+    tft.fillScreen(COLOR_BG);
+    
+    // WiFi indicator
+    drawWiFiIndicator(WiFi.RSSI());
+    
+    // Draw Month Name
+    char monthStringDisplay[15];
+    strftime(monthStringDisplay, 15, "%B", &timeinfo);
+    for(int i = 0; monthStringDisplay[i]; i++) monthStringDisplay[i] = toupper(monthStringDisplay[i]);
+    
+    tft.setFont(&FreeSansBold12pt7b);
+    tft.setTextColor(COLOR_TEXT);
+    int16_t x1, y1;
+    uint16_t w, h;
     tft.getTextBounds(monthStringDisplay, 0, 0, &x1, &y1, &w, &h);
-  }
-  
-  tft.setCursor((160 - w) / 2, 30);
-  tft.print(monthStringDisplay);
+    
+    if (w > 150) {
+        tft.setFont(&FreeSans9pt7b);
+        tft.getTextBounds(monthStringDisplay, 0, 0, &x1, &y1, &w, &h);
+    }
+    
+    tft.setCursor((160 - w) / 2, 28);
+    tft.print(monthStringDisplay);
 
-  // Draw Date Number (e.g., 26)
-  char dateString[3];
-  strftime(dateString, 3, "%d", &timeinfo);
-  
-  tft.setFont(&FreeSansBold18pt7b);
-  tft.setTextColor(COLOR_ACCENT);
-  tft.getTextBounds(dateString, 0, 0, &x1, &y1, &w, &h);
-  tft.setCursor((160 - w) / 2, 65);
-  tft.print(dateString);
+    // Draw Date Number
+    char dateString[3];
+    strftime(dateString, 3, "%d", &timeinfo);
+    
+    tft.setFont(&FreeSansBold18pt7b);
+    tft.setTextColor(COLOR_ACCENT);
+    tft.getTextBounds(dateString, 0, 0, &x1, &y1, &w, &h);
+    tft.setCursor((160 - w) / 2, 62);
+    tft.print(dateString);
 
-  tft.fillRect(157, 0, 3, 80, ST77XX_BLACK); // Mask glitch
+    // Animated border
+    tft.drawRoundRect(5, 5, 150, 68, 8, COLOR_ACCENT);
+    tft.drawRoundRect(6, 6, 148, 66, 7, COLOR_ACCENT);
+    
+    // Progress indicator
+    drawProgressIndicator(screenIndex);
 }
 
+// Bangla Premium UI with day name - FIXED orientation
 void draw_bangla_premium_ui() {
-  struct tm timeinfo;
-  if(!getLocalTime(&timeinfo)) return;
+    struct tm timeinfo;
+    if(!getLocalTime(&timeinfo)) return;
 
-  tft.fillScreen(COLOR_BG);
-  tft.drawRoundRect(5, 5, 150, 70, 8, COLOR_ACCENT);
-  tft.drawRoundRect(6, 6, 148, 68, 7, COLOR_ACCENT);
+    tft.fillScreen(COLOR_BG);
+    drawWiFiIndicator(WiFi.RSSI());
+    
+    BanglaDate bd = getBanglaDate(timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900);
+    
+    // Draw Bangla Day Name (Top) - smaller and higher
+    String banDay = banglaDays[timeinfo.tm_wday];
+    BTTextSize daySize = renderer->getTextSize(banDay.c_str());
+    text_x_offset = (160 - daySize.width) / 2;
+    text_y_offset = 16;
+    current_text_color = COLOR_DIM;
+    renderer->renderText(banDay.c_str(), draw_pixel_callback);
+    
+    // Draw Bangla Month (Middle) - adjusted position
+    String banMonth = banglaMonths[bd.month];
+    BTTextSize size = renderer->getTextSize(banMonth.c_str());
+    text_x_offset = (160 - size.width) / 2;
+    text_y_offset = 34;
+    current_text_color = COLOR_TEXT;
+    renderer->renderText(banMonth.c_str(), draw_pixel_callback);
 
-  BanglaDate bd = getBanglaDate(timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900);
-  
-  // 1. Draw Bangla Month (Top)
-  String banMonth = banglaMonths[bd.month];
-  BTTextSize size = renderer->getTextSize(banMonth.c_str());
-  current_text_width = size.width;
-  current_text_height = size.height;
-  
-  text_x_offset = (160 - size.width) / 2;
-  text_y_offset = 30; // Matches premium date layout
-  current_text_color = COLOR_TEXT;
-  renderer->renderText(banMonth.c_str(), draw_pixel_callback);
+    // Draw Bangla Date (Bottom) - larger and lower
+    String banDate = toBanglaDigits(bd.day);
+    size = renderer->getTextSize(banDate.c_str());
+    text_x_offset = (160 - size.width) / 2;
+    text_y_offset = 56;
+    current_text_color = COLOR_ACCENT;
+    renderer->renderText(banDate.c_str(), draw_pixel_callback);
 
-  // 2. Draw Bangla Date (Bottom)
-  String banDate = toBanglaDigits(bd.day);
-  size = renderer->getTextSize(banDate.c_str());
-  current_text_width = size.width;
-  current_text_height = size.height;
-
-  text_x_offset = (160 - size.width) / 2;
-  text_y_offset = 65; 
-  current_text_color = COLOR_ACCENT;
-  renderer->renderText(banDate.c_str(), draw_pixel_callback);
-
-  tft.fillRect(157, 0, 3, 80, ST77XX_BLACK); // Mask glitch
+    // Border
+    tft.drawRoundRect(5, 5, 150, 68, 8, COLOR_ACCENT);
+    tft.drawRoundRect(6, 6, 148, 66, 7, COLOR_ACCENT);
+    
+    // Progress indicator
+    drawProgressIndicator(screenIndex);
 }
 
-void showMarquee(String text, uint16_t color) {
-  tft.setFont(&FreeSansBold12pt7b); // Match Time Slide Font
-  int16_t x1, y1;
-  uint16_t w, h;
-  tft.getTextBounds(text.c_str(), 0, 0, &x1, &y1, &w, &h);
-  
-  if (w <= 140) {
+// Draw wrapped paragraph text (smaller font, no marquee)
+void showUNEvent(String text, uint16_t color) {
     tft.fillScreen(COLOR_BG);
-    tft.drawRoundRect(5, 5, 150, 70, 8, COLOR_ACCENT);
-    tft.setCursor((160 - w) / 2, (80 + h) / 2 - 2); 
-    tft.setTextColor(color);
-    tft.print(text);
-    delay(6000); // Display for 6 seconds
-    return;
-  }
-
-  // Scroll infinitely but bound by a 10-second slide time
-  unsigned long startTime = millis();
-  int x = 160;
-  while (millis() - startTime < 10000) { 
-    tft.fillScreen(COLOR_BG);
-    tft.drawRoundRect(5, 5, 150, 70, 8, COLOR_ACCENT);
-    tft.setCursor(x, (80 + h) / 2 - 2);
-    tft.setTextColor(color);
-    tft.print(text);
+    drawWiFiIndicator(WiFi.RSSI());
+    tft.drawRoundRect(5, 5, 150, 68, 8, COLOR_ACCENT);
+    tft.drawRoundRect(6, 6, 148, 66, 7, COLOR_ACCENT);
     
-    tft.fillRect(157, 0, 3, 80, COLOR_BG); // Mask edge glitch
+    // Use smaller font for paragraph style
+    tft.setFont(&FreeSans9pt7b);
+    tft.setTextColor(color);
     
-    x -= 4;
-    if (x < -(int)w - 20) x = 160; // Wrap around
-    delay(15);
-  }
+    // Word wrap the text
+    int16_t x1, y1;
+    uint16_t w, h;
+    int margin = 12;
+    int maxWidth = 160 - (margin * 2);
+    int yPos = 18;
+    int lineHeight = 16;
+    
+    String word = "";
+    String line = "";
+    
+    for (int i = 0; i < text.length(); i++) {
+        char c = text[i];
+        
+        if (c == ' ' || c == '\0') {
+            // Test if adding this word exceeds width
+            String testLine = line + word;
+            tft.getTextBounds(testLine.c_str(), 0, 0, &x1, &y1, &w, &h);
+            
+            if (w > maxWidth && line.length() > 0) {
+                // Draw current line
+                tft.getTextBounds(line.c_str(), 0, 0, &x1, &y1, &w, &h);
+                tft.setCursor(margin, yPos);
+                tft.print(line);
+                
+                // Move to next line
+                line = word;
+                yPos += lineHeight;
+                
+                // Stop if we run out of space
+                if (yPos > 65) break;
+            } else {
+                line = testLine;
+            }
+            word = "";
+        } else {
+            word += c;
+        }
+    }
+    
+    // Draw remaining text
+    if (line.length() > 0 && yPos <= 65) {
+        tft.getTextBounds(line.c_str(), 0, 0, &x1, &y1, &w, &h);
+        tft.setCursor(margin, yPos);
+        tft.print(line);
+    }
+    
+    drawProgressIndicator(screenIndex);
+    delay(6000);
 }
 
 void button_task(void *param) {
-  while (1) {
-    button.tick();
-    delay(50);
-  }
+    while (1) {
+        button.tick();
+        delay(50);
+    }
 }
 
 void button_pressed() {
-  FastLED.showColor(CRGB::Gold);
-  delay(200);
-  FastLED.showColor(CRGB::Black);
+    FastLED.showColor(CRGB::Gold);
+    delay(200);
+    FastLED.showColor(CRGB::Black);
 }
 
-// ------------------------------------------------------------------------------------
-
 void setup() {
-  Serial.begin(115200);
-  
-  SPI.begin(TFT_SCL_PIN, -1, TFT_SDA_PIN, TFT_CS_PIN);
-  
-  tft.initR(INITR_MINI160x80);
-  tft.invertDisplay(true);
-  tft.setRotation(3);
-  tft.fillScreen(COLOR_BG);
-  
-  tft.setCursor(10, 30);
-  tft.setTextColor(COLOR_TEXT);
-  tft.println("Syncing Time...");
-
-  if (TFT_LEDA_PIN != -1) {
-    pinMode(TFT_LEDA_PIN, OUTPUT);  
-    digitalWrite(TFT_LEDA_PIN, 1);  
-  }
-
-  WiFi.begin(ssid, password);
-  int retry = 0;
-  while (WiFi.status() != WL_CONNECTED && retry < 20) {
-    delay(500);
-    retry++;
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-    delay(1000);
-    renderer = new BanglaTextRenderer(&font);
-    draw_premium_ui();
-  } else {
-    tft.fillScreen(COLOR_BG);
+    Serial.begin(115200);
+    
+    SPI.begin(TFT_SCL_PIN, -1, TFT_SDA_PIN, TFT_CS_PIN);
+    
+    tft.initR(INITR_MINI160x80);
+    tft.invertDisplay(true);
+    tft.setRotation(3);
+    tft.fillScreen(ST77XX_BLACK);
+    
     tft.setCursor(10, 30);
-    tft.setTextColor(ST77XX_RED);
-    tft.println("WiFi Error");
-  }
+    tft.setTextColor(COLOR_TEXT);
+    tft.println("Syncing Time...");
 
-  FastLED.addLeds<APA102, LED_DI_PIN, LED_CI_PIN, BGR>(&leds, 1);  
-  FastLED.showColor(CRGB::Black);
+    if (TFT_LEDA_PIN != -1) {
+        pinMode(TFT_LEDA_PIN, OUTPUT);
+        digitalWrite(TFT_LEDA_PIN, 1);
+    }
 
-  button.attachClick(button_pressed);
-  xTaskCreatePinnedToCore(button_task, "button_task", 2048, NULL, 1, NULL, 0);
+    WiFi.begin(ssid, password);
+    int retry = 0;
+    while (WiFi.status() != WL_CONNECTED && retry < 20) {
+        delay(500);
+        retry++;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+        delay(1000);
+        renderer = new BanglaTextRenderer(&font);
+        
+        // Initial theme
+        struct tm timeinfo;
+        getLocalTime(&timeinfo);
+        updateThemeForTime(timeinfo.tm_hour);
+        
+        draw_premium_ui();
+    } else {
+        tft.fillScreen(ST77XX_BLACK);
+        tft.setCursor(10, 30);
+        tft.setTextColor(ST77XX_RED);
+        tft.println("WiFi Error");
+    }
+
+    FastLED.addLeds<APA102, LED_DI_PIN, LED_CI_PIN, BGR>(&leds, 1);
+    FastLED.showColor(CRGB::Black);
+
+    button.attachClick(button_pressed);
+    xTaskCreatePinnedToCore(button_task, "button_task", 2048, NULL, 1, NULL, 0);
 }
 
 void loop() {
-  struct tm timeinfo;
-  
-  // 1. Show Time for 5 seconds with blinking colon
-  for(int i=0; i<5; i++) {
+    struct tm timeinfo;
+    
+    // Update theme based on current hour
+    getLocalTime(&timeinfo);
+    updateThemeForTime(timeinfo.tm_hour);
+    
+    // 1. Show Time for 5 seconds with blinking colon
+    currentScreen = SCREEN_TIME;
+    screenIndex = 0;
+    for(int i=0; i<5; i++) {
+        if(getLocalTime(&timeinfo)) {
+            char timeBuf[10];
+            if (i % 2 == 0) strftime(timeBuf, sizeof(timeBuf), "%H:%M", &timeinfo);
+            else strftime(timeBuf, sizeof(timeBuf), "%H %M", &timeinfo);
+            
+            tft.fillScreen(COLOR_BG);
+            drawWiFiIndicator(WiFi.RSSI());
+            tft.drawRoundRect(5, 5, 150, 68, 8, COLOR_ACCENT);
+            tft.drawRoundRect(6, 6, 148, 66, 7, COLOR_ACCENT);
+            tft.setFont(&FreeSansBold18pt7b);
+            tft.setTextColor(COLOR_TEXT);
+            
+            int16_t x1, y1;
+            uint16_t w, h;
+            tft.getTextBounds(timeBuf, 0, 0, &x1, &y1, &w, &h);
+            tft.setCursor((160 - w) / 2, (75 + h) / 2 + 5);
+            tft.print(timeBuf);
+            drawProgressIndicator(screenIndex);
+        }
+        delay(1000);
+    }
+
+    // 2. Show Premium Date UI (Month + Date)
+    currentScreen = SCREEN_DATE_EN;
+    screenIndex = 1;
     if(getLocalTime(&timeinfo)) {
-      char timeBuf[10];
-      // Blink effect: toggle between colon and space
-      if (i % 2 == 0) strftime(timeBuf, sizeof(timeBuf), "%H:%M", &timeinfo);
-      else strftime(timeBuf, sizeof(timeBuf), "%H %M", &timeinfo);
-      
-      tft.fillScreen(COLOR_BG);
-      tft.drawRoundRect(5, 5, 150, 70, 8, COLOR_ACCENT);
-      tft.setFont(&FreeSansBold18pt7b); // Bigger font
-      tft.setTextColor(COLOR_TEXT);
-      
-      int16_t x1, y1;
-      uint16_t w, h;
-      tft.getTextBounds(timeBuf, 0, 0, &x1, &y1, &w, &h);
-      tft.setCursor((160 - w) / 2, (80 + h) / 2 + 5); // Centered
-      tft.print(timeBuf);
-      tft.fillRect(157, 0, 3, 80, COLOR_BG); // Mask glitch
+        draw_premium_ui();
+        delay(3000);
     }
-    delay(1000);
-  }
 
-  // 2. Show Premium Date UI (Month + Date)
-  if(getLocalTime(&timeinfo)) {
-    draw_premium_ui();
-    delay(3000);
-  }
-
-  // 3. Show Bangla Premium Date UI
-  if(getLocalTime(&timeinfo)) {
-    draw_bangla_premium_ui();
-    delay(3000);
-  }
-
-  // 4. Show International Day if any
-  if(getLocalTime(&timeinfo)) {
-    const char* unDay = getUNEvent(timeinfo.tm_mon + 1, timeinfo.tm_mday);
-    if (unDay != NULL) {
-      showMarquee(String(unDay), COLOR_TEXT);
+    // 3. Show Bangla Premium Date UI with day name
+    currentScreen = SCREEN_DATE_BN;
+    screenIndex = 2;
+    if(getLocalTime(&timeinfo)) {
+        draw_bangla_premium_ui();
+        delay(3000);
     }
-  }
+
+    // 4. Show International Day as paragraph (no marquee)
+    currentScreen = SCREEN_EVENT;
+    screenIndex = 3;
+    if(getLocalTime(&timeinfo)) {
+        const char* unDay = getUNEvent(timeinfo.tm_mon + 1, timeinfo.tm_mday);
+        if (unDay != NULL) {
+            showUNEvent(String(unDay), COLOR_TEXT);
+        }
+    }
 }
