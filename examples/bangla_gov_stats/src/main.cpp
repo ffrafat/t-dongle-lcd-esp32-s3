@@ -1,9 +1,6 @@
 #include <Arduino.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
-#include <Fonts/FreeSansBold12pt7b.h>
-#include <Fonts/FreeSansBold18pt7b.h>
-#include <Fonts/FreeSans9pt7b.h>
 #include <OneButton.h>
 #include <FastLED.h>
 #include <SPI.h>
@@ -17,6 +14,11 @@
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS_PIN, TFT_DC_PIN, TFT_RES_PIN);
 CRGB leds;
 OneButton button(BTN_PIN, true);
+
+// Link the external C array from image.c safely
+extern "C" {
+    extern const unsigned short banglagov48[2304];
+}
 
 // WiFi Credentials
 const char* ssid     = "bangla.gov.bd";
@@ -49,7 +51,7 @@ enum ScreenMode {
     SCREEN_WELCOME,
     SCREEN_JULY_STATS,
     SCREEN_PURNO_STATS,
-    SCREEN_SYS_STATS
+    SCREEN_WORD_STATS
 };
 
 ScreenMode currentScreen = SCREEN_WELCOME;
@@ -58,6 +60,7 @@ int screenIndex = 0;
 // API Stats Variables (Volatile & Thread-Safe)
 volatile int july_downloads = -1;
 volatile int purno_downloads = -1;
+volatile int word_downloads = -1;
 volatile bool stats_loading = true;
 volatile bool stats_error = false;
 volatile bool trigger_immediate_fetch = false;
@@ -79,35 +82,41 @@ void updateThemeForTime(int hour) {
     }
 }
 
-// WiFi signal strength indicator
-void drawWiFiIndicator(int rssi) {
-    int bars = 0;
-    if (rssi > -50) bars = 4;
-    else if (rssi > -60) bars = 3;
-    else if (rssi > -70) bars = 2;
-    else if (rssi > -80) bars = 1;
+// Page numbers centered at startX = 53 with unique colors per page
+void drawPageNumbers(int activeIndex) {
+    int startX = 53;
+    int y = 73;
+    uint16_t activeColors[] = {
+        ST77XX_MAGENTA, // Page 1 (Welcome) - Magenta
+        ST77XX_GREEN,   // Page 2 (July) - Green
+        ST77XX_CYAN,    // Page 3 (Purno) - Cyan
+        ST77XX_YELLOW   // Page 4 (Word) - Yellow
+    };
     
-    int x = 145;
-    int y = 2;
+    tft.setFont(NULL);
+    tft.setTextSize(1);
+    
     for (int i = 0; i < 4; i++) {
-        int barHeight = 3 + (i * 2);
-        if (i < bars) {
-            tft.fillRect(x + (i * 4), y + (10 - barHeight), 2, barHeight, COLOR_ACCENT);
+        int x = startX + (i * 16);
+        tft.setCursor(x, y);
+        if (i == activeIndex) {
+            tft.setTextColor(activeColors[i]);
+            tft.print(i + 1);
         } else {
-            tft.fillRect(x + (i * 4), y + (10 - barHeight), 2, barHeight, COLOR_DIM);
+            tft.setTextColor(COLOR_DIM);
+            tft.print(i + 1);
         }
     }
 }
 
-// Progress indicator (4 dots)
-void drawProgressIndicator(int activeIndex) {
-    int startX = 64;
-    int y = 75;
-    for (int i = 0; i < 4; i++) {
-        if (i == activeIndex) {
-            tft.fillCircle(startX + (i * 9), y, 3, COLOR_ACCENT);
-        } else {
-            tft.drawCircle(startX + (i * 9), y, 3, COLOR_DIM);
+// Custom function to draw RGB565 bitmap with swapped bytes (endianness correction)
+// Uses highly reliable drawPixel() to ensure universal driver compatibility and no blank screens
+void drawRGBBitmapSwapped(int16_t x, int16_t y, const uint16_t bitmap[], int16_t w, int16_t h) {
+    for (int16_t row = 0; row < h; row++) {
+        for (int16_t col = 0; col < w; col++) {
+            uint16_t color = pgm_read_word(&bitmap[row * w + col]);
+            uint16_t swapped = (color >> 8) | (color << 8); // Swap high and low bytes
+            tft.drawPixel(x + col, y + row, swapped);
         }
     }
 }
@@ -174,9 +183,13 @@ void fetch_stats_task(void *param) {
                 Serial.println("[StatsTask] Fetching Purno font stats...");
                 int purno_count = fetchDownloadCountFromAPI("02b6b237-2875-44a4-80ea-e720f8d7d488");
                 
-                if (july_count != -1 && purno_count != -1) {
+                Serial.println("[StatsTask] Fetching Word Add-in stats...");
+                int word_count = fetchDownloadCountFromAPI("602a728d-b718-47ee-906f-d153f05d99fc");
+                
+                if (july_count != -1 && purno_count != -1 && word_count != -1) {
                     july_downloads = july_count;
                     purno_downloads = purno_count;
+                    word_downloads = word_count;
                     stats_loading = false;
                     stats_error = false;
                     
@@ -205,133 +218,105 @@ void fetch_stats_task(void *param) {
     }
 }
 
-// Helper to draw centered text with custom font
-void drawCenteredText(const char* text, const GFXfont* font, int16_t y, uint16_t color) {
-    int16_t x1, y1;
-    uint16_t w, h;
-    tft.setFont(font);
+// Helper to draw centered text with standard font and size
+void drawCenteredText(const char* text, uint8_t size, int16_t y, uint16_t color) {
+    tft.setFont(NULL);
+    tft.setTextSize(size);
     tft.setTextColor(color);
-    tft.getTextBounds(text, 0, y, &x1, &y1, &w, &h);
-    tft.setCursor((160 - w) / 2, y);
+    int16_t w = strlen(text) * 6 * size;
+    int16_t x = (160 - w) / 2;
+    if (x < 0) x = 0;
+    tft.setCursor(x, y);
     tft.print(text);
 }
 
-// Screen 1: Dashboard Cover / Welcome
+// Screen 1: "BANGLA.GOV.BD" centered vertically and horizontally in yellow
 void draw_screen_welcome() {
     tft.fillScreen(COLOR_BG);
-    drawWiFiIndicator(WiFi.RSSI());
     
-    tft.drawRoundRect(5, 5, 150, 68, 8, COLOR_ACCENT);
-    tft.drawRoundRect(6, 6, 148, 66, 7, COLOR_ACCENT);
+    // Centered vertically (height of size 2 is 16px, so (80 - 16)/2 = 32. offset slightly for indicator spacing)
+    drawCenteredText("BANGLA.GOV.BD", 2, 30, ST77XX_YELLOW);
     
-    // Title Line 1: "BANGLA.GOV"
-    drawCenteredText("BANGLA.GOV", &FreeSansBold12pt7b, 26, COLOR_TEXT);
-    
-    // Title Line 2: "PORTAL STATS"
-    drawCenteredText("PORTAL STATS", &FreeSansBold12pt7b, 46, COLOR_ACCENT);
-    
-    // English URL footer
-    drawCenteredText("bangla.gov.bd", &FreeSans9pt7b, 64, COLOR_DIM);
-    
-    drawProgressIndicator(screenIndex);
+    drawPageNumbers(screenIndex);
 }
 
-// Screen 2: July Font Downloads
+// Screen 2: July Font Downloads (No "dl" text, Title size 2, value size 3)
 void draw_screen_july() {
     tft.fillScreen(COLOR_BG);
-    drawWiFiIndicator(WiFi.RSSI());
     
     tft.drawRoundRect(5, 5, 150, 68, 8, COLOR_ACCENT);
     tft.drawRoundRect(6, 6, 148, 66, 7, COLOR_ACCENT);
     
-    // Title: "JULY FONT"
-    drawCenteredText("JULY FONT", &FreeSansBold12pt7b, 22, COLOR_TEXT);
+    // Title: "July Font" (size 2)
+    drawCenteredText("July Font", 2, 12, COLOR_TEXT);
     
-    // Value: Download Count or Connection Status
+    // Value: count (size 3) or Status (size 2)
     if (stats_loading && july_downloads == -1) {
-        drawCenteredText("Loading...", &FreeSansBold12pt7b, 48, COLOR_DIM);
+        drawCenteredText("Loading...", 2, 36, COLOR_DIM);
     } else if (stats_error && july_downloads == -1) {
-        drawCenteredText("Conn Error", &FreeSansBold12pt7b, 48, ST77XX_RED);
+        drawCenteredText("Conn Error", 2, 36, ST77XX_RED);
     } else {
         char countBuf[16];
         snprintf(countBuf, sizeof(countBuf), "%d", july_downloads);
-        drawCenteredText(countBuf, &FreeSansBold18pt7b, 48, COLOR_ACCENT);
+        drawCenteredText(countBuf, 3, 34, COLOR_ACCENT);
     }
     
-    // Footer: "Downloads"
-    drawCenteredText("Downloads", &FreeSans9pt7b, 66, COLOR_DIM);
-    
-    drawProgressIndicator(screenIndex);
+    drawPageNumbers(screenIndex);
 }
 
-// Screen 3: Purno Font Downloads
+// Screen 3: Purno Font Downloads (No "dl" text, Title size 2, value size 3)
 void draw_screen_purno() {
     tft.fillScreen(COLOR_BG);
-    drawWiFiIndicator(WiFi.RSSI());
     
     tft.drawRoundRect(5, 5, 150, 68, 8, COLOR_ACCENT);
     tft.drawRoundRect(6, 6, 148, 66, 7, COLOR_ACCENT);
     
-    // Title: "PURNO FONT"
-    drawCenteredText("PURNO FONT", &FreeSansBold12pt7b, 22, COLOR_TEXT);
+    // Title: "Purno Font" (size 2)
+    drawCenteredText("Purno Font", 2, 12, COLOR_TEXT);
     
-    // Value: Download Count or Connection Status
+    // Value: count (size 3) or Status (size 2)
     if (stats_loading && purno_downloads == -1) {
-        drawCenteredText("Loading...", &FreeSansBold12pt7b, 48, COLOR_DIM);
+        drawCenteredText("Loading...", 2, 36, COLOR_DIM);
     } else if (stats_error && purno_downloads == -1) {
-        drawCenteredText("Conn Error", &FreeSansBold12pt7b, 48, ST77XX_RED);
+        drawCenteredText("Conn Error", 2, 36, ST77XX_RED);
     } else {
         char countBuf[16];
         snprintf(countBuf, sizeof(countBuf), "%d", purno_downloads);
-        drawCenteredText(countBuf, &FreeSansBold18pt7b, 48, COLOR_ACCENT);
+        drawCenteredText(countBuf, 3, 34, COLOR_ACCENT);
     }
     
-    // Footer: "Downloads"
-    drawCenteredText("Downloads", &FreeSans9pt7b, 66, COLOR_DIM);
-    
-    drawProgressIndicator(screenIndex);
+    drawPageNumbers(screenIndex);
 }
 
-// Screen 4: Device & System Network Diagnostics
-void draw_screen_sys_stats() {
+// Screen 4: Word Add-in Downloads (No "dl" text, Title size 2, value size 3)
+void draw_screen_word() {
     tft.fillScreen(COLOR_BG);
-    drawWiFiIndicator(WiFi.RSSI());
     
     tft.drawRoundRect(5, 5, 150, 68, 8, COLOR_ACCENT);
     tft.drawRoundRect(6, 6, 148, 66, 7, COLOR_ACCENT);
     
-    tft.setFont(&FreeSans9pt7b);
+    // Title: "Word Add-in" (size 2)
+    drawCenteredText("Word Add-in", 2, 12, COLOR_TEXT);
     
-    // Line 1: IP Address
-    tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(12, 22);
-    tft.print("IP: ");
-    tft.setTextColor(COLOR_ACCENT);
-    tft.print(WiFi.localIP().toString());
+    // Value: count (size 3) or Status (size 2)
+    if (stats_loading && word_downloads == -1) {
+        drawCenteredText("Loading...", 2, 36, COLOR_DIM);
+    } else if (stats_error && word_downloads == -1) {
+        drawCenteredText("Conn Error", 2, 36, ST77XX_RED);
+    } else {
+        char countBuf[16];
+        snprintf(countBuf, sizeof(countBuf), "%d", word_downloads);
+        drawCenteredText(countBuf, 3, 34, COLOR_ACCENT);
+    }
     
-    // Line 2: Free Heap Space
-    tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(12, 38);
-    tft.print("Heap: ");
-    tft.setTextColor(COLOR_ACCENT);
-    tft.print(ESP.getFreeHeap() / 1024);
-    tft.print(" KB");
-    
-    // Line 3: Target API Server IP
-    tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(12, 54);
-    tft.print("API: ");
-    tft.setTextColor(COLOR_ACCENT);
-    tft.print("103.48.19.234");
-    
-    drawProgressIndicator(screenIndex);
+    drawPageNumbers(screenIndex);
 }
 
 // Button click triggers manual refresh and immediately schedules API update
 void button_pressed() {
     FastLED.showColor(CRGB::Gold);
     
-    // Cycle screens manually on click
+    // Cycle screens manually on click (4 screens total)
     screenIndex = (screenIndex + 1) % 4;
     currentScreen = (ScreenMode)screenIndex;
     
@@ -359,9 +344,10 @@ void setup() {
     tft.setRotation(3);
     tft.fillScreen(ST77XX_BLACK);
     
-    tft.setCursor(10, 30);
-    tft.setFont(&FreeSans9pt7b);
+    tft.setFont(NULL);
+    tft.setTextSize(1);
     tft.setTextColor(COLOR_TEXT);
+    tft.setCursor(10, 36);
     tft.println("Connecting WiFi...");
 
     if (TFT_LEDA_PIN != -1) {
@@ -379,21 +365,25 @@ void setup() {
 
     if (WiFi.status() == WL_CONNECTED) {
         tft.fillScreen(ST77XX_BLACK);
-        tft.setCursor(10, 30);
+        tft.setFont(NULL);
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_TEXT);
+        tft.setCursor(10, 36);
         tft.println("Syncing time...");
         
         configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-        delay(1000);
         
-        // Adjust background themes based on real NTP time
+        // Adjust background themes based on real NTP time (2-second safe timeout)
         struct tm timeinfo;
-        if (getLocalTime(&timeinfo)) {
+        if (getLocalTime(&timeinfo, 2000)) {
             updateThemeForTime(timeinfo.tm_hour);
         }
     } else {
         tft.fillScreen(ST77XX_BLACK);
-        tft.setCursor(10, 30);
+        tft.setFont(NULL);
+        tft.setTextSize(1);
         tft.setTextColor(ST77XX_RED);
+        tft.setCursor(10, 36);
         tft.println("WiFi Error");
     }
 
@@ -413,7 +403,8 @@ void setup() {
 
 void loop() {
     struct tm timeinfo;
-    if (getLocalTime(&timeinfo)) {
+    // Set timeout to 0ms to query the local system clock instantly without blocking
+    if (getLocalTime(&timeinfo, 0)) {
         updateThemeForTime(timeinfo.tm_hour);
     }
     
@@ -428,12 +419,12 @@ void loop() {
         case SCREEN_PURNO_STATS:
             draw_screen_purno();
             break;
-        case SCREEN_SYS_STATS:
-            draw_screen_sys_stats();
+        case SCREEN_WORD_STATS:
+            draw_screen_word();
             break;
     }
     
-    // Auto-advance screens every 6 seconds
+    // Auto-advance screens every 6 seconds (4 screens total)
     delay(6000);
     screenIndex = (screenIndex + 1) % 4;
     currentScreen = (ScreenMode)screenIndex;
